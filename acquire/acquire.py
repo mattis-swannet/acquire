@@ -180,6 +180,31 @@ def from_user_home(target: Target, path: str) -> Iterator[str]:
         yield home_dir.joinpath(path).as_posix()
 
 
+# Suffixes (lowercase, forward-slash) of the built-in Windows service account profiles that
+# `misc_windows_user_homes` yields alongside real user homes. Matched with `str.endswith`, so
+# they're recognized regardless of the mount prefix ("sysvol/...", "C:/...", etc.) in front of them.
+NON_INTERACTIVE_HOME_SUFFIXES = (
+    "windows/serviceprofiles/localservice",
+    "windows/serviceprofiles/networkservice",
+    "windows/system32/config/systemprofile",
+)
+
+
+def from_interactive_user_home(target: Target, path: str) -> Iterator[str]:
+    """Like :func:`from_user_home`, but skips the built-in, non-interactive Windows service
+    account profiles (LocalService, NetworkService, SYSTEM's systemprofile).
+
+    These accounts never run interactive applications like browsers, and their
+    ``AppData``/``Local`` trees can be large enough (populated by AV/EDR agents, update
+    services, etc.) that walking them for every browser artifact spec entry is a significant,
+    avoidable cost.
+    """
+    for home_dir in _get_user_home_dirs(target):
+        if home_dir.as_posix().lower().endswith(NON_INTERACTIVE_HOME_SUFFIXES):
+            continue
+        yield home_dir.joinpath(path).as_posix()
+
+
 def iter_ntfs_filesystems(target: Target) -> Iterator[tuple[ntfs.NtfsFilesystem, str | None, str, str]]:
     mount_lookup = defaultdict(list)
     for mount, fs in target.fs.mounts.items():
@@ -1334,45 +1359,57 @@ class History(Module):
 
     SPEC = (
         # IE
-        ("path", "AppData/Local/Microsoft/Internet Explorer/Recovery", from_user_home),
-        ("path", "AppData/Local/Microsoft/Windows/INetCookies", from_user_home),
-        ("glob", "AppData/Local/Microsoft/Windows/WebCache/*.dat", from_user_home),
+        ("path", "AppData/Local/Microsoft/Internet Explorer/Recovery", from_interactive_user_home),
+        ("path", "AppData/Local/Microsoft/Windows/INetCookies", from_interactive_user_home),
+        ("glob", "AppData/Local/Microsoft/Windows/WebCache/*.dat", from_interactive_user_home),
         # IE - index.dat
-        ("path", "Cookies/index.dat", from_user_home),
-        ("path", "Local Settings/History/History.IE5/index.dat", from_user_home),
-        ("glob", "Local Settings/History/History.IE5/MSHist*/index.dat", from_user_home),
-        ("path", "Local Settings/Temporary Internet Files/Content.IE5/index.dat", from_user_home),
-        ("path", "Local Settings/Application Data/Microsoft/Feeds Cache/index.dat", from_user_home),
-        ("path", "AppData/Local/Microsoft/Windows/History/History.IE5/index.dat", from_user_home),
-        ("glob", "AppData/Local/Microsoft/Windows/History/History.IE5/MSHist*/index.dat", from_user_home),
-        ("path", "AppData/Local/Microsoft/Windows/History/Low/History.IE5/index.dat", from_user_home),
-        ("glob", "AppData/Local/Microsoft/Windows/History/Low/History.IE5/MSHist*/index.dat", from_user_home),
-        ("path", "AppData/Local/Microsoft/Windows/Temporary Internet Files/Content.IE5/index.dat", from_user_home),
-        ("path", "AppData/Local/Microsoft/Windows/Temporary Internet Files/Low/Content.IE5/index.dat", from_user_home),
-        ("path", "AppData/Roaming/Microsoft/Windows/Cookies/index.dat", from_user_home),
-        ("path", "AppData/Roaming/Microsoft/Windows/Cookies/Low/index.dat", from_user_home),
-        ("path", "AppData/Roaming/Microsoft/Windows/IEDownloadHistory/index.dat", from_user_home),
+        ("path", "Cookies/index.dat", from_interactive_user_home),
+        ("path", "Local Settings/History/History.IE5/index.dat", from_interactive_user_home),
+        ("glob", "Local Settings/History/History.IE5/MSHist*/index.dat", from_interactive_user_home),
+        ("path", "Local Settings/Temporary Internet Files/Content.IE5/index.dat", from_interactive_user_home),
+        ("path", "Local Settings/Application Data/Microsoft/Feeds Cache/index.dat", from_interactive_user_home),
+        ("path", "AppData/Local/Microsoft/Windows/History/History.IE5/index.dat", from_interactive_user_home),
+        ("glob", "AppData/Local/Microsoft/Windows/History/History.IE5/MSHist*/index.dat", from_interactive_user_home),
+        ("path", "AppData/Local/Microsoft/Windows/History/Low/History.IE5/index.dat", from_interactive_user_home),
+        (
+            "glob",
+            "AppData/Local/Microsoft/Windows/History/Low/History.IE5/MSHist*/index.dat",
+            from_interactive_user_home,
+        ),
+        (
+            "path",
+            "AppData/Local/Microsoft/Windows/Temporary Internet Files/Content.IE5/index.dat",
+            from_interactive_user_home,
+        ),
+        (
+            "path",
+            "AppData/Local/Microsoft/Windows/Temporary Internet Files/Low/Content.IE5/index.dat",
+            from_interactive_user_home,
+        ),
+        ("path", "AppData/Roaming/Microsoft/Windows/Cookies/index.dat", from_interactive_user_home),
+        ("path", "AppData/Roaming/Microsoft/Windows/Cookies/Low/index.dat", from_interactive_user_home),
+        ("path", "AppData/Roaming/Microsoft/Windows/IEDownloadHistory/index.dat", from_interactive_user_home),
         # Firefox - Windows
-        ("glob", "AppData/Local/Mozilla/Firefox/Profiles/*/*.sqlite*", from_user_home),
-        ("glob", "AppData/Roaming/Mozilla/Firefox/Profiles/*/*.sqlite*", from_user_home),
-        ("glob", "Application Data/Mozilla/Firefox/Profiles/*/*.sqlite*", from_user_home),
+        ("glob", "AppData/Local/Mozilla/Firefox/Profiles/*/*.sqlite*", from_interactive_user_home),
+        ("glob", "AppData/Roaming/Mozilla/Firefox/Profiles/*/*.sqlite*", from_interactive_user_home),
+        ("glob", "Application Data/Mozilla/Firefox/Profiles/*/*.sqlite*", from_interactive_user_home),
         # Firefox - macOS
         ("glob", "/Users/*/Library/Application Support/Firefox/Profiles/*/*.sqlite*"),
         # Firefox - RHEL/Ubuntu - Flatpak
-        ("glob", ".var/app/org.mozilla.firefox/.mozilla/firefox/*/*.sqlite*", from_user_home),
+        ("glob", ".var/app/org.mozilla.firefox/.mozilla/firefox/*/*.sqlite*", from_interactive_user_home),
         # Firefox - RHEL/Ubuntu - DNF/apt
-        ("glob", ".mozilla/firefox/*/*.sqlite*", from_user_home),
+        ("glob", ".mozilla/firefox/*/*.sqlite*", from_interactive_user_home),
         # Firefox - RHEL/Ubuntu - snap
-        ("glob", "snap/firefox/common/.mozilla/firefox/*/*.sqlite*", from_user_home),
+        ("glob", "snap/firefox/common/.mozilla/firefox/*/*.sqlite*", from_interactive_user_home),
         # Brave - Ubuntu - snap
-        ("glob", "snap/brave/[0-9]*/.config/BraveSoftware/**", from_user_home),
+        ("glob", "snap/brave/[0-9]*/.config/BraveSoftware/**", from_interactive_user_home),
         # Safari - macOS
-        ("path", "Library/Safari/Bookmarks.plist", from_user_home),
-        ("path", "Library/Safari/Downloads.plist", from_user_home),
-        ("path", "Library/Safari/Extensions/Extensions.plist", from_user_home),
-        ("glob", "Library/Safari/History.*", from_user_home),
-        ("path", "Library/Safari/LastSession.plist", from_user_home),
-        ("path", "Library/Caches/com.apple.Safari/Cache.db", from_user_home),
+        ("path", "Library/Safari/Bookmarks.plist", from_interactive_user_home),
+        ("path", "Library/Safari/Downloads.plist", from_interactive_user_home),
+        ("path", "Library/Safari/Extensions/Extensions.plist", from_interactive_user_home),
+        ("glob", "Library/Safari/History.*", from_interactive_user_home),
+        ("path", "Library/Safari/LastSession.plist", from_interactive_user_home),
+        ("path", "Library/Caches/com.apple.Safari/Cache.db", from_interactive_user_home),
     )
 
     @classmethod
@@ -1390,7 +1427,7 @@ class History(Module):
                 full_path = f"{root_dir}/{extension_dir}/{history_file}"
                 search_type = "glob" if "*" in full_path else "path"
 
-                spec.add((search_type, full_path, from_user_home))
+                spec.add((search_type, full_path, from_interactive_user_home))
 
         return spec
 
