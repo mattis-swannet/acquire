@@ -152,17 +152,32 @@ MISC_MAPPING = {
 }
 
 
-def from_user_home(target: Target, path: str) -> Iterator[str]:
+@functools.lru_cache(maxsize=8)
+def _get_user_home_dirs(target: Target) -> tuple[fsutil.TargetPath, ...]:
+    """Return every user home directory on ``target``, real and default/misc alike.
+
+    This walks the target's user details and filesystem, which is expensive and, for
+    a given target, always yields the same result. It's cached because it otherwise gets
+    re-run once for every spec entry that resolves through :func:`from_user_home`, which
+    across all modules adds up to thousands of redundant filesystem walks per acquisition.
+    """
+    home_dirs = []
+
     try:
-        for user_details in target.user_details.all_with_home():
-            yield user_details.home_path.joinpath(path).as_posix()
+        home_dirs.extend(user_details.home_path for user_details in target.user_details.all_with_home())
     except Exception as e:
         log.warning("Error occurred when requesting all user homes")
         log.debug("", exc_info=e)
 
     misc_user_homes = MISC_MAPPING.get(target.os, misc_unix_user_homes)
-    for user_dir in misc_user_homes(target):
-        yield user_dir.joinpath(path).as_posix()
+    home_dirs.extend(misc_user_homes(target))
+
+    return tuple(home_dirs)
+
+
+def from_user_home(target: Target, path: str) -> Iterator[str]:
+    for home_dir in _get_user_home_dirs(target):
+        yield home_dir.joinpath(path).as_posix()
 
 
 def iter_ntfs_filesystems(target: Target) -> Iterator[tuple[ntfs.NtfsFilesystem, str | None, str, str]]:
@@ -1250,7 +1265,11 @@ class History(Module):
     DESC = "browser history from IE, Edge, Firefox, and Chrome"
 
     class DirCombinations(NamedTuple):
-        root_dirs: list[str]
+        # root_dirs is a list of (target_os, path) pairs, where target_os is one of "windows",
+        # "macos" or "linux" (mirroring the OS buckets `from_user_home`/`MISC_MAPPING` already
+        # use). This lets `get_spec_additions` only expand the paths relevant to the target's
+        # actual OS, instead of also globbing for e.g. Windows AppData paths on a Linux target.
+        root_dirs: list[tuple[str, str]]
         dir_extensions: list[str]
         history_files: list[str]
 
@@ -1258,36 +1277,36 @@ class History(Module):
         DirCombinations(
             [
                 # Chromium - RHEL/Ubuntu - DNF/apt
-                ".config/chromium",
+                ("linux", ".config/chromium"),
                 # Chrome - RHEL/Ubuntu - DNF
-                ".config/google-chrome",
+                ("linux", ".config/google-chrome"),
                 # Edge - RHEL/Ubuntu - DNF/apt
-                ".config/microsoft-edge",
+                ("linux", ".config/microsoft-edge"),
                 # Chrome - RHEL/Ubuntu - Flatpak
-                ".var/app/com.google.Chrome/config/google-chrome",
+                ("linux", ".var/app/com.google.Chrome/config/google-chrome"),
                 # Edge - RHEL/Ubuntu - Flatpak
-                ".var/app/com.microsoft.Edge/config/microsoft-edge",
+                ("linux", ".var/app/com.microsoft.Edge/config/microsoft-edge"),
                 # Chromium - RHEL/Ubuntu - Flatpak
-                ".var/app/org.chromium.Chromium/config/chromium",
+                ("linux", ".var/app/org.chromium.Chromium/config/chromium"),
                 # Chrome
-                "AppData/Local/Google/Chrom*/User Data",
+                ("windows", "AppData/Local/Google/Chrom*/User Data"),
                 # Edge
-                "AppData/Local/Microsoft/Edge/User Data",
-                "Library/Application Support/Microsoft Edge",
-                "Local Settings/Application Data/Microsoft/Edge/User Data",
+                ("windows", "AppData/Local/Microsoft/Edge/User Data"),
+                ("macos", "Library/Application Support/Microsoft Edge"),
+                ("windows", "Local Settings/Application Data/Microsoft/Edge/User Data"),
                 # Chrome - Legacy
-                "Library/Application Support/Chromium",
-                "Library/Application Support/Google/Chrome",
-                "Local Settings/Application Data/Google/Chrom*/User Data",
+                ("macos", "Library/Application Support/Chromium"),
+                ("macos", "Library/Application Support/Google/Chrome"),
+                ("windows", "Local Settings/Application Data/Google/Chrom*/User Data"),
                 # Chromium - RHEL/Ubuntu - snap
-                "snap/chromium/common/chromium",
+                ("linux", "snap/chromium/common/chromium"),
                 # Brave - Windows
-                "AppData/Local/BraveSoftware/Brave-Browser/User Data",
-                "AppData/Roaming/BraveSoftware/Brave-Browser/User Data",
+                ("windows", "AppData/Local/BraveSoftware/Brave-Browser/User Data"),
+                ("windows", "AppData/Roaming/BraveSoftware/Brave-Browser/User Data"),
                 # Brave - Linux
-                ".config/BraveSoftware",
+                ("linux", ".config/BraveSoftware"),
                 # Brave - MacOS
-                "Library/Application Support/BraveSoftware",
+                ("macos", "Library/Application Support/BraveSoftware"),
             ],
             ["*", "Snapshots/*/*"],
             [
@@ -1358,9 +1377,16 @@ class History(Module):
 
     @classmethod
     def get_spec_additions(cls, target: Target, cli_args: argparse.Namespace) -> Iterator[tuple]:
+        # Only expand the root_dirs relevant to this target's OS, mirroring the same
+        # windows/macos/else-linux bucketing that `from_user_home`/`MISC_MAPPING` use, instead
+        # of also generating e.g. Windows AppData combinations for a Linux target that could
+        # never match.
+        target_os = target.os if target.os in ("windows", "macos") else "linux"
+
         spec = set()
         for root_dirs, extension_dirs, history_files in cls.COMMON_DIR_COMBINATIONS:
-            for root_dir, extension_dir, history_file in product(root_dirs, extension_dirs, history_files):
+            matching_root_dirs = [path for dir_os, path in root_dirs if dir_os == target_os]
+            for root_dir, extension_dir, history_file in product(matching_root_dirs, extension_dirs, history_files):
                 full_path = f"{root_dir}/{extension_dir}/{history_file}"
                 search_type = "glob" if "*" in full_path else "path"
 
