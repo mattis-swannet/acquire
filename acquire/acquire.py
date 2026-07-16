@@ -187,6 +187,7 @@ NON_INTERACTIVE_HOME_SUFFIXES = (
     "windows/serviceprofiles/localservice",
     "windows/serviceprofiles/networkservice",
     "windows/system32/config/systemprofile",
+    "windows/syswow64/config/systemprofile"
 )
 
 
